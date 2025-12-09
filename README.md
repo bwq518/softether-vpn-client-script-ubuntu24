@@ -23,5 +23,8 @@ Usage: vpnse conncect/start/status/disconnect/stop/add/del account_namev
 
 ===============================================
 
-Any suggestion, pls. send email to me. bwq518@gmail.com
+Any suggestion, pls. send email to me. 
+===============================================
+bwq518@gmail.com
+
 2025.12.9. @Beijing, China
