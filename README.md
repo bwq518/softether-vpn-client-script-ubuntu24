@@ -2,7 +2,7 @@ How to install?
 ===============================================
 !!!!!!!!!!!!!  Attention  !!!!!!!!!!!!
 
-The bin. files were compilted on Ubuntu 24.04 x86_64 linux.
+The bin. files were compiled on Ubuntu 24.04 x86_64 linux.
 
 You should double check the OS verions before connecting vpn by softether vpn client.
 
