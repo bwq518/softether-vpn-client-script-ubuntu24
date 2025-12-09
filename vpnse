@@ -8,7 +8,7 @@ CLIENT_DIR=/usr/local/bin
 # Switch display language to en
 echo "en" >$CLIENT_DIR/lang.config
 
-# function: determin the ip address is lebal or not
+# function: determin the ip address is legal or not
 # input IP address. return 0 if legal, 1 if illegal.
 function is_valid_ip() {
   local ip=$1
