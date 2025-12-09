@@ -50,11 +50,6 @@ get_local_iface() {
 }
 
 vpn_start() {
-  local account_name
-  local local_iface
-
-  account_name=$1
-  local_iface=$2
   check_process "vpnclient"
   if [ $? -eq 0 ]; then
     echo "vpnclient  does not run. Start it now..."
@@ -66,25 +61,42 @@ vpn_start() {
 }
 
 vpn_stop() {
-  local account_name
-  local local_iface
-
-  account_name=$1
-  local_iface=$2
   check_process "vpnclient"
   if [ $? -eq 0 ]; then
     echo "vpnclient  does not run."
     return 0
   fi
-  $CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name >/dev/null 2>&1
-  if [ $? -ne 0 ]; then
-    echo "Invalid account_name:$account_name"
-    return 1
-  fi
+  local local_iface=$(get_local_iface)
 
-  vpn_disconnect $account_name $local_iface
-  sleep 3
+# Get all vpn setting names
+  all_accounts=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountList | grep "VPN Connection Setting Name" | cut -d "|" -f 2 | xargs)
+  echo "All account names: $all_accounts"
+  for i in $all_accounts
+  do
+    vpn_disconnect $i $local_iface
+    sleep 3
+  done
   $CLIENT_DIR/vpnclient stop
+  return 0
+}
+
+vpn_status()
+{
+  local account_name
+
+  account_name=$1
+  check_process "vpnclient"
+  if [ $? -eq 0 ]; then
+    echo "vpnclient  does not run."
+    return 0
+  fi
+  if [ X"$account_name" = X_ ]; then
+    $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList
+  else
+    $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountStatusGet $account_name
+  fi
+  # List the network routes
+  netstat -rn
   return 0
 }
 
@@ -146,9 +158,9 @@ vpn_connect() {
 
   exit_code=0
   for i in $(seq 1 5); do
-    status=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountList $account_name | grep "Status" | cut -d "|" -f 2)
+    status=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountStatusGet $account_name | grep "Session Status" | cut -d "|" -f 2)
     echo "Connection status of $account_name : $status"
-    if [ "X$status" = "XConnected" ]; then
+    if [ "X$status" = "XConnection Completed (Session Established)" ]; then
       exit_code=0
       echo "Connection established."
       break
@@ -163,7 +175,7 @@ vpn_connect() {
     return 4
   fi
 
-  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountStatusGet $account_name
 
   echo "dhclient -r $vpn_client_iface"
   dhclient -r $vpn_client_iface
@@ -221,7 +233,7 @@ vpn_disconnect()
     echo "vpnclient  does not run."
     return 0
   fi
-  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountStatusGet $account_name
   sleep 3
 
   local_ip=$(ifconfig $local_iface | grep 'inet ' | awk '{ print $2}' | tr 'a-z' 'A-Z' | sed ':a;N;s/\n/ /g;ta')
@@ -254,31 +266,13 @@ vpn_disconnect()
   ip route del default
   ip route add default via $local_gateway proto static
 
-  status=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountList $account_name | grep "Status" | cut -d "|" -f 2)
+  status=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountStatusGet $account_name | grep "Session Status" | cut -d "|" -f 2)
   echo "Connection status of $account_name : $status" 
-  if [ "X$status" = "XConnected" ]; then
+  if [ "X$status" = "XConnection Completed (Session Established)" ]; then
     $CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountDisconnect $account_name
   fi
   echo "dhclient -r $vpn_client_iface"
   dhclient -r $vpn_client_iface
-  # List the network routes
-  netstat -rn
-  return 0
-}
-
-vpn_status()
-{
-  local account_name
-  local local_iface
-
-  account_name=$1
-  local_iface=$2
-  check_process "vpnclient"
-  if [ $? -eq 0 ]; then
-    echo "vpnclient  does not run."
-    return 0
-  fi
-  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList $account_name
   # List the network routes
   netstat -rn
   return 0
@@ -383,7 +377,7 @@ add_account() {
     esac
   done
 
-  vpn_start $account_name $local_iface
+  vpn_start
 
   $CLIENT_DIR/vpncmd /TOOLS /CMD check
   sleep 2
@@ -424,7 +418,7 @@ del_account() {
     esac
   done
 
-  vpn_start $account_name $local_iface
+  vpn_start
   vpn_disconnect $account_name $local_iface
 
   vpn_nic_name=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name | grep "Device Name Used for Connection" | cut -d "|" -f 2)
@@ -445,19 +439,23 @@ usage() {
   echo "       $prog disconn van2869"
   echo "       $prog start van2869"
   echo "       $prog stop van2869"
-  echo "       $prog stutas van2869"
+  echo "       $prog status [van2869]"
   echo "       $prog add van2869"
   echo "       $prog del van2869"
 }
 
 ###################################################
-if [ $# -ne 2 ]; then
+if [ $# -eq 1 ]; then
+  operation=$1
+  my_accountname=""
+elif [ $# -eq 2 ]; then
+  operation=$1
+  my_accountname=$2
+else
   usage
   exit 1
 fi
 
-operation=$1
-my_accountname=$2
 my_iface=$(get_local_iface)
 if [ X"$my_iface" = X ]; then
   echo "Can not get local NIC's interface"
@@ -467,27 +465,46 @@ echo "You are going to connect VPN with account: $my_accountname"
 echo "VPN is using the first active NIC's interface: $my_iface"
 case $operation in
   connect | conn)
-    vpn_start $my_accountname $my_iface
-    vpn_connect $my_accountname $my_iface
+    if [ X"$my_accountname" != X ]; then
+      vpn_start
+      vpn_connect $my_accountname $my_iface
+    else
+      echo "pls. input account name as the 2nd parameter."
+    fi
     ;;
   disconnect | disconn)
-    vpn_disconnect $my_accountname $my_iface
+    if [ X"$my_accountname" != X ]; then
+      vpn_disconnect $my_accountname $my_iface
+    else
+      echo "pls. input account name as the 2nd parameter."
+    fi
     ;;
   start)
-    vpn_start $my_accountname $my_iface
+    vpn_start
     ;;
   stop)
-    vpn_disconnect $my_accountname $my_iface
-    vpn_stop $my_accountname $my_iface
+      vpn_stop
     ;;
   status)
-    vpn_status $my_accountname $my_iface
+    if [ X"$my_accountname" != X ]; then
+      vpn_status $my_accountname
+    else
+      vpn_status "_"
+    fi
     ;;
   add)
-    add_account $my_accountname $my_iface
+    if [ X"$my_accountname" != X ]; then
+      add_account $my_accountname $my_iface
+    else
+      echo "pls. input account name as the 2nd parameter."
+    fi
     ;;
   del)
-    del_account $my_accountname $my_iface
+    if [ X"$my_accountname" != X ]; then
+      del_account $my_accountname $my_iface
+    else
+      echo "pls. input account name as the 2nd parameter."
+    fi
     ;;
   *)
     echo "Invalid option."
