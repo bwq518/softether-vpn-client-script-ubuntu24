@@ -17,13 +17,13 @@ You should double check the OS verions before connecting vpn by softether vpn cl
 
 You can run vpnse now.
 ===============================================
-Usage: vpnse conncect/start/status/disconnect/stop/add/del account_namev
+Usage: vpnse conncect/start/status/disconnect/stop/add/del account_name
 
        vpnse conn van2869
        vpnse disconn van2869
        vpnse start van2869
        vpnse stop van2869
-       vpnse status van2869
+       vpnse status [van2869]
        vpnse add van2869
        vpnse del van2869
 
