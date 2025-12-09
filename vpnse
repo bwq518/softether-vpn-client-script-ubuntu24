@@ -1,0 +1,498 @@
+#!/bin/bash
+#
+# Written by Weiquan Bao. (C) All rights reserved.
+# bwq518@gmail.com, 2025.12.06
+#
+export LC_ALL=C
+CLIENT_DIR=/usr/local/bin
+# Switch display language to en
+echo "en" >$CLIENT_DIR/lang.config
+
+# function: determin the ip address is lebal or not
+# input IP address. return 0 if legal, 1 if illegal.
+function is_valid_ip() {
+  local ip=$1
+  if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    IFS='.' read -r -a ip_parts <<<"$ip"
+    if [[ ${ip_parts[0]} -le 255 && ${ip_parts[1]} -le 255 && ${ip_parts[2]} -le 255 && ${ip_parts[3]} -le 255 ]]; then
+      return 0
+    else
+      return
+    fi
+  else
+    return 1
+  fi
+}
+
+check_process() {
+  isrun=$(ps aux | grep -v grep | grep "$1" | wc -l)
+  if [ $isrun -gt 0 ]; then
+    return 1
+  else
+    return 0
+  fi
+}
+
+get_local_iface() {
+  local local_iface=""
+  # only get the first active NIC
+  if command -v ip >/dev/null 2>&1; then
+    local_iface=$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$' | grep -v 'vpn_' | cut -d "@" -f 1 | head -n 1)
+  elif command -v ifconfig >/dev/null 2>&1; then
+    local_iface=$(ifconfig -a | grep -E '^[a-zA-Z0-9]+' | awk '{print $1}' | grep -v '^lo$' | grep -v "vpn_" | cut -d "@" -f 1 | head -n 1)
+  else
+    echo "Erro: shell command ip or ifconfg is not installed in this system."
+  fi
+  if [ X"$local_iface" = X ]; then
+    echo "Can not get local NIC interface name."
+  fi
+  echo "$local_iface"
+}
+
+vpn_start() {
+  local account_name
+  local local_iface
+
+  account_name=$1
+  local_iface=$2
+  check_process "vpnclient"
+  if [ $? -eq 0 ]; then
+    echo "vpnclient  does not run. Start it now..."
+    $CLIENT_DIR/vpnclient start
+    sleep 3
+  fi
+  ps aux | grep vpnclient | grep -v grep
+  return 0
+}
+
+vpn_stop() {
+  local account_name
+  local local_iface
+
+  account_name=$1
+  local_iface=$2
+  check_process "vpnclient"
+  if [ $? -eq 0 ]; then
+    echo "vpnclient  does not run."
+    return 0
+  fi
+  $CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name >/dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    echo "Invalid account_name:$account_name"
+    return 1
+  fi
+
+  vpn_disconnect $account_name $local_iface
+  sleep 3
+  $CLIENT_DIR/vpnclient stop
+  return 0
+}
+
+vpn_connect() {
+  local account_name
+  local local_iface
+  local local_ip
+  local local_gateway
+  local vpn_host_name
+  local vpn_host_ipv4
+  local vpn_nic_name
+  local vpn_client_iface
+  local vpn_client_ip
+  local vpn_host_gateway
+  local vpn_host_gateway_last
+  local vpn_nic_name
+  local status
+
+  account_name=$1
+  local_iface=$2
+
+  $CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name >/dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    echo "Invalid account_name:$account_name"
+    return 1
+  fi
+
+  local vpn_host_get=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name | grep "Destination VPN Server Host Name" | cut -d "|" -f 2)
+  if [ $? -ne 0 ] || [ X"$vpn_host_get" = X ]; then
+    echo "Failed to get account fron vpnclient."
+    return 2
+  else
+    vpn_host_name=$vpn_host_get
+  fi
+
+  vpn_host_ipv4=$(host -4 $vpn_host_name | sed 's/.*address //')
+  is_valid_ip "$vpn_host_ipv4"
+  if [ $? -ne 0 ]; then
+    echo "Invalid vpn server public ip."
+    return 3
+  fi
+
+  local_ip=$(ifconfig $local_iface | grep 'inet ' | awk '{ print $2}' | tr 'a-z' 'A-Z' | sed ':a;N;s/\n/ /g;ta')
+  local_gateway=$(netstat -rn | grep $local_iface | grep "UG" | awk '{print $2}')
+  if [ X"$local_gateway" = X ]; then
+    echo "Can not get local gateway from netstat. default xxx.xxx.xxx.1 will be used."
+    local_gateway=$(echo $local_ip | rev | sed 's/^[^.]*./1./' | rev)
+  fi
+  echo "Local : interface: $local_iface, ip: $local_ip, gateway: $local_gateway"
+
+  vpn_nic_name=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name | grep "Device Name Used for Connection" | cut -d "|" -f 2)
+  vpn_client_iface="vpn_$vpn_nic_name"
+  vpn_host_gateway_last=$(netstat -rn | grep $vpn_client_iface | grep "UG" | awk '{print $2}')
+
+  vpn_disconnect $account_name $local_iface
+  sleep 3
+  $CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountConnect $account_name
+  sleep 5
+
+  exit_code=0
+  for i in $(seq 1 5); do
+    status=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountList $account_name | grep "Status" | cut -d "|" -f 2)
+    echo "Connection status of $account_name : $status"
+    if [ "X$status" = "XConnected" ]; then
+      exit_code=0
+      echo "Connection established."
+      break
+    else
+      exit_code=1
+      echo "Retrying to connect ($i)..."
+      sleep 5
+    fi
+  done
+  if [ $exit_code -ne 0 ]; then
+    echo "Failed to connect to vpn server."
+    return 4
+  fi
+
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList
+
+  echo "dhclient -r $vpn_client_iface"
+  dhclient -r $vpn_client_iface
+  echo "dhclient -4 $vpn_client_iface"
+  dhclient -4 $vpn_client_iface
+  sleep 5
+
+  vpn_client_ip=$(ifconfig $vpn_client_iface | grep 'inet ' | awk '{ print $2}' | tr 'a-z' 'A-Z' | sed ':a;N;s/\n/ /g;ta')
+  is_valid_ip "$vpn_client_ip"
+  if [ $? -ne 0 ]; then
+    echo "Failed to get valid ip for vpn NIC."
+    return 5
+  fi
+
+  vpn_host_gateway=$(netstat -rn | grep $vpn_client_iface | grep "UG" | awk '{print $2}')
+  if [ X"$vpn_host_gateway" = X ]; then
+    if [ X"$vpn_host_gateway_last" != X ]; then
+      echo "Can not get VPN host gateway from netstat. The last one ($vpn_host_gateway_last) will be used."
+      vpn_host_gateway=$vpn_host_gateway_last
+    else
+      echo "Can not get VPN host gateway both from netstat and from last one. default xxx.xxx.xxx.1 will be used."
+      vpn_host_gateway=$(echo $vpn_client_ip | rev | sed 's/^[^.]*./1./' | rev)
+    fi
+  fi
+  echo "VPN client: interface: $vpn_client_iface, client ip: $vpn_client_ip, name: $vpn_host_name"
+  echo "VPN server: WAN IP: $vpn_host_ipv4, gateway: $vpn_host_gateway"
+
+  echo "Redirect traffic"
+  echo "ip route add $vpn_host_ipv4/32 via $local_gateway"
+  ip route add $vpn_host_ipv4/32 via $local_gateway
+  echo "ip route replace default via $vpn_host_gateway"
+  ip route replace default via $vpn_host_gateway
+  # List the network routes
+  netstat -rn
+  return 0
+}
+
+vpn_disconnect()
+{
+  local account_name
+  local local_iface
+  local local_ip
+  local local_gateway
+  local vpn_host_name
+  local vpn_host_ipv4
+  local vpn_nic_name
+  local vpn_client_iface
+  local status
+
+  account_name=$1
+  local_iface=$2
+
+  check_process "vpnclient"
+  if [ $? -eq 0 ]; then
+    echo "vpnclient  does not run."
+    return 0
+  fi
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList
+  sleep 3
+
+  local_ip=$(ifconfig $local_iface | grep 'inet ' | awk '{ print $2}' | tr 'a-z' 'A-Z' | sed ':a;N;s/\n/ /g;ta')
+  local_gateway=$(netstat -rn | grep $local_iface | grep "UG" | awk '{print $2}')
+  if [ X"$local_gateway" = X ]; then
+    echo "Can not get local gateway from netstat. default xxx.xxx.xxx.1 will be used."
+    local_gateway=$(echo $local_ip | rev | sed 's/^[^.]*./1./' | rev)
+  fi
+  echo "Local : interface: $local_iface, ip: $local_ip, gateway: $local_gateway"
+
+  local vpn_host_get=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name | grep "Destination VPN Server Host Name" | cut -d "|" -f 2)
+  if [ $? -ne 0 ] || [ X"$vpn_host_get" = X ]; then
+    echo "Failed to get account fron vpnclient."
+    return 1
+  else
+    vpn_host_name=$vpn_host_get
+  fi
+
+  vpn_host_ipv4=$(host -4 $vpn_host_name | sed 's/.*address //')
+  is_valid_ip "$vpn_host_ipv4"
+  if [ $? -ne 0 ]; then
+    echo "Invalid vpn server public ip."
+    return 2
+  fi
+
+  vpn_nic_name=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name | grep "Device Name Used for Connection" | cut -d "|" -f 2)
+  vpn_client_iface="vpn_$vpn_nic_name"
+  # Remove the ip routes of VPN
+  ip route del $vpn_host_ipv4/32
+  ip route del default
+  ip route add default via $local_gateway proto static
+
+  status=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountList $account_name | grep "Status" | cut -d "|" -f 2)
+  echo "Connection status of $account_name : $status" 
+  if [ "X$status" = "XConnected" ]; then
+    $CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountDisconnect $account_name
+  fi
+  echo "dhclient -r $vpn_client_iface"
+  dhclient -r $vpn_client_iface
+  # List the network routes
+  netstat -rn
+  return 0
+}
+
+vpn_status()
+{
+  local account_name
+  local local_iface
+
+  account_name=$1
+  local_iface=$2
+  check_process "vpnclient"
+  if [ $? -eq 0 ]; then
+    echo "vpnclient  does not run."
+    return 0
+  fi
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountList $account_name
+  # List the network routes
+  netstat -rn
+  return 0
+}
+
+add_account() {
+  local account_name
+  local local_iface
+  local user_name=""
+  local user_passwd="12345678"
+  local vpn_nic_name="vpn"
+  local vpn_host_name=""
+  local vpn_host_port=""
+  local vpn_host_ipv4=""
+  local vpn_host_hub="DEFAULT"
+  local in_val=""
+  local num_null
+
+  account_name=$1
+  local_iface=$2
+
+  while true; do
+    echo ">>>>>>>You must input every value!!!<<<<<<<<"
+    num_null=0
+
+    read -t 30 -ep "Enter the account name ($account_name): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$account_name" ] && num_null=`expr $num_null + 1`
+    else
+      account_name=$in_val
+    fi
+
+    read -ep "Enter the user name for connect to server ($user_name): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$user_name" ] && num_null=`expr $num_null + 1`
+    else
+      user_name=$in_val
+    fi
+
+    read -ep "Enter the password ($user_passwd): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$user_passwd" ] && num_null=`expr $num_null + 1`
+    else
+      user_passwd=$in_val
+    fi
+
+    read -t 30 -ep "Enter the NIC name for vpn client ($vpn_nic_name): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$vpn_nic_name" ] && num_null=`expr $num_null + 1`
+    else
+      vpn_nic_name=$in_val
+    fi
+
+    read -ep "Enter the VPN host IPv4 or domain name ($vpn_host_name): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$vpn_host_name" ] && num_null=`expr $num_null + 1`
+    else
+      vpn_host_name=$in_val
+    fi
+
+    read -ep "Enter the VPN host port ($vpn_host_port): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$vpn_host_port" ] && num_null=`expr $num_null + 1`
+    else
+      vpn_host_port=$in_val
+    fi
+
+    read -t 30 -ep "Enter the HUB at VPN server ($vpn_host_hub): " in_val
+    if [ -z "$in_val" ]; then
+      [ -z "$vpn_host_hub" ] && num_null=`expr $num_null + 1`
+    else
+      vpn_host_hub=$in_val
+    fi
+
+    [ $num_null -eq 0 ] && break
+  done
+
+  echo "You input the following info:"
+  echo "-----------------------------------"
+  echo "Account Name     : $account_name"
+  echo "User name        : $user_name"
+  echo "User password    : $user_passwd"
+  echo "VPN NIC name     : $vpn_nic_name"
+  echo "VPN host name    : $vpn_host_name"
+  echo "VPN host port    : $vpn_host_port"
+  echo "VPN HUB          : $vpn_host_hub"
+  echo "-----------------------------------"
+
+  while true; do
+    read -p "Do you wish to create this account? " yn
+    case $yn in
+      [Yy]* )
+        echo "Creating the account $account_name now ..."  
+        break
+      ;;
+      [Nn]* )
+        return
+      ;;
+      * )
+        echo "Please answer yes or no."
+      ;;
+    esac
+  done
+
+  vpn_start $account_name $local_iface
+
+  $CLIENT_DIR/vpncmd /TOOLS /CMD check
+  sleep 2
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD NicCreate $vpn_nic_name
+  sleep 2
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountCreate $account_name /SERVER:$vpn_host_name:$vpn_host_port /HUB:$vpn_host_hub /USERNAME:$user_name /NICNAME:$vpn_nic_name
+  sleep 2
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountPasswordSet $account_name /PASSWORD:$user_passwd /TYPE:standard
+  sleep 2
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountDetailSet $account_name /MAXTCP:8 /INTERVAL:1 /TTL:300 /HALF:no /NOTRACK:no /NOQOS:no /BRIDGE:no /MONITOR:no
+  sleep 2
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountCompressEnable $account_name
+  sleep 2
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountGet $account_name
+  return 0
+}
+
+del_account() {
+  local account_name
+  local local_iface
+  local vpn_nic_name
+
+  account_name=$1
+  local_iface=$2
+
+  while true; do
+    read -p "Do you wish to delete this account ($account_name)? " yn
+    case $yn in
+      [Yy]* )
+        break
+      ;;
+      [Nn]* )
+        return
+      ;;
+      * )
+        echo "Please answer yes or no."
+      ;;
+    esac
+  done
+
+  vpn_start $account_name $local_iface
+  vpn_disconnect $account_name $local_iface
+
+  vpn_nic_name=$($CLIENT_DIR/vpncmd localhost /CLIENT /CMD AccountGet $account_name | grep "Device Name Used for Connection" | cut -d "|" -f 2)
+  echo "Delteing the NIC device $vpn_nic_name now ..."
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD NicDelete $vpn_nic_name
+  sleep 2
+  echo "Deleting the account $account_name now ..."  
+  $CLIENT_DIR/vpncmd /CLIENT localhost /CMD AccountDelete $account_name
+  return 0
+}
+
+usage() {
+  local prog=$(basename $0)
+  echo "Toolkit for softether vpn client management on linux"
+  echo "Written by bwq518@gmail.com. (C)2025-$(date "+%Y"). All rights reserved."
+  echo "Usage: $prog conncect/start/status/disconnect/stop/add/del account_name"
+  echo "  e.g. $prog conn van2869"
+  echo "       $prog disconn van2869"
+  echo "       $prog start van2869"
+  echo "       $prog stop van2869"
+  echo "       $prog stutas van2869"
+  echo "       $prog add van2869"
+  echo "       $prog del van2869"
+}
+
+###################################################
+if [ $# -ne 2 ]; then
+  usage
+  exit 1
+fi
+
+operation=$1
+my_accountname=$2
+my_iface=$(get_local_iface)
+if [ X"$my_iface" = X ]; then
+  echo "Can not get local NIC's interface"
+  exit 1
+fi
+echo "You are going to connect VPN with account: $my_accountname"
+echo "VPN is using the first active NIC's interface: $my_iface"
+case $operation in
+  connect | conn)
+    vpn_start $my_accountname $my_iface
+    vpn_connect $my_accountname $my_iface
+    ;;
+  disconnect | disconn)
+    vpn_disconnect $my_accountname $my_iface
+    ;;
+  start)
+    vpn_start $my_accountname $my_iface
+    ;;
+  stop)
+    vpn_disconnect $my_accountname $my_iface
+    vpn_stop $my_accountname $my_iface
+    ;;
+  status)
+    vpn_status $my_accountname $my_iface
+    ;;
+  add)
+    add_account $my_accountname $my_iface
+    ;;
+  del)
+    del_account $my_accountname $my_iface
+    ;;
+  *)
+    echo "Invalid option."
+    usage
+    exit 1
+    ;;
+esac
+exit 0
