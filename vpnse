@@ -456,6 +456,17 @@ else
   exit 1
 fi
 
+# Check all bin files exist or not
+for i in vpnclient vpncmd hamcore.se2
+do
+  if [ ! -f $CLIENT_DIR/$i ]; then
+    echo "Fatal error: $CLIENT_DIR/$i does not exist. exit now..."
+    exit 2
+  else
+    echo "Found bin file: $CLIENT_DIR/$i"
+  fi
+done
+
 my_iface=$(get_local_iface)
 if [ X"$my_iface" = X ]; then
   echo "Can not get local NIC's interface"
@@ -483,7 +494,7 @@ case $operation in
     vpn_start
     ;;
   stop)
-    vpn_stop
+     vpn_stop
     ;;
   status)
     if [ X"$my_accountname" != X ]; then
